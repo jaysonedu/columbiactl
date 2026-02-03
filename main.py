@@ -63,31 +63,30 @@ def simulate_match(rating1: float, rd1: float, rating2: float, rd2: float,
 
 
 def calculate(t1: List[Tuple[float, float]], t2: List[Tuple[float, float]], must_send_first: int = None, 
-              t1_original: List[int] = None, t2_original: List[int] = None,
+              t1_indices: List[int] = None, t2_indices: List[int] = None,
               t1_counterpick_used: bool = False, t2_counterpick_used: bool = False) -> Tuple[float, float, List[Tuple[int, int]]]:
     """
     Find the optimal matchup between two teams to maximize t1's points.
     must_send_first: 1 if team1 must send first, 2 if team2 must send first, None if first match
+    t1_indices/t2_indices: lists of original indices corresponding to current players in t1/t2
     t1_counterpick_used/t2_counterpick_used: whether each team has used their counterpick
     Returns (best_t1_points, best_t2_points, best_matchup).
     best_matchup is a list of (t1_player_index, t2_player_index) pairs.
     """
-    # Store original teams for index mapping
-    if t1_original is None:
-        t1_original = t1.copy()
-    if t2_original is None:
-        t2_original = t2.copy()
+    # Initialize indices if not provided (each player maps to its position)
+    if t1_indices is None:
+        t1_indices = list(range(len(t1)))
+    if t2_indices is None:
+        t2_indices = list(range(len(t2)))
     
     if len(t1) == 0 and len(t2) == 0:
         return (0.0, 0.0, [])
-
+    
     if len(t1) == 1 and len(t2) == 1:
         r1, rd1 = t1[0]
         r2, rd2 = t2[0]
         points1, points2, _ = simulate_match(r1, rd1, r2, rd2)
-        t1_idx = t1_original.index(t1[0])
-        t2_idx = t2_original.index(t2[0])
-        return (points1, points2, [(t1_idx, t2_idx)])
+        return (points1, points2, [(t1_indices[0], t2_indices[0])])
     
     best_points1 = -1.0
     best_points2 = 0.0
@@ -107,17 +106,19 @@ def calculate(t1: List[Tuple[float, float]], t2: List[Tuple[float, float]], must
                 r2, rd2 = player2
                 match_points1, match_points2, win_prob1 = simulate_match(r1, rd1, r2, rd2)
                 
-                # Create new teams without the matched players
+                # Create new teams without the matched players, and track their indices
                 new_t1 = t1[:i] + t1[i+1:]
                 new_t2 = t2[:j] + t2[j+1:]
+                new_t1_indices = t1_indices[:i] + t1_indices[i+1:]
+                new_t2_indices = t2_indices[:j] + t2_indices[j+1:]
                 
                 # If team1 wins, consider counterpick option
                 if t1_counterpick_used:
-                    if_win1_points1, if_win1_points2, if_win1_matchup = calculate(new_t1, new_t2, 1, t1_original, t2_original, True, t2_counterpick_used)
+                    if_win1_points1, if_win1_points2, if_win1_matchup = calculate(new_t1, new_t2, 1, new_t1_indices, new_t2_indices, True, t2_counterpick_used)
                     win1_points1 = 7.0 + if_win1_points1
                 else:
-                    keep_win_p1, keep_win_p2, keep_win_m = calculate(new_t1, new_t2, 1, t1_original, t2_original, True, t2_counterpick_used)
-                    counterpick_p1, counterpick_p2, counterpick_m = calculate(new_t1, new_t2, 2, t1_original, t2_original, True, t2_counterpick_used)
+                    keep_win_p1, keep_win_p2, keep_win_m = calculate(new_t1, new_t2, 1, new_t1_indices, new_t2_indices, True, t2_counterpick_used)
+                    counterpick_p1, counterpick_p2, counterpick_m = calculate(new_t1, new_t2, 2, new_t1_indices, new_t2_indices, True, t2_counterpick_used)
                     if 7.0 + keep_win_p1 > 6.0 + counterpick_p1:
                         if_win1_points1, if_win1_points2, if_win1_matchup = keep_win_p1, keep_win_p2, keep_win_m
                         win1_points1 = 7.0 + if_win1_points1
@@ -127,11 +128,11 @@ def calculate(t1: List[Tuple[float, float]], t2: List[Tuple[float, float]], must
                 
                 # If team2 wins, consider counterpick option
                 if t2_counterpick_used:
-                    if_win2_points1, if_win2_points2, if_win2_matchup = calculate(new_t1, new_t2, 2, t1_original, t2_original, t1_counterpick_used, True)
+                    if_win2_points1, if_win2_points2, if_win2_matchup = calculate(new_t1, new_t2, 2, new_t1_indices, new_t2_indices, t1_counterpick_used, True)
                     win2_points2 = 7.0 + if_win2_points2
                 else:
-                    keep_win_p1, keep_win_p2, keep_win_m = calculate(new_t1, new_t2, 2, t1_original, t2_original, t1_counterpick_used, True)
-                    counterpick_p1, counterpick_p2, counterpick_m = calculate(new_t1, new_t2, 1, t1_original, t2_original, t1_counterpick_used, True)
+                    keep_win_p1, keep_win_p2, keep_win_m = calculate(new_t1, new_t2, 2, new_t1_indices, new_t2_indices, t1_counterpick_used, True)
+                    counterpick_p1, counterpick_p2, counterpick_m = calculate(new_t1, new_t2, 1, new_t1_indices, new_t2_indices, t1_counterpick_used, True)
                     if 7.0 + keep_win_p2 > 6.0 + counterpick_p2 or (7.0 + keep_win_p1 < 6.0 + counterpick_p1):
                         if_win2_points1, if_win2_points2, if_win2_matchup = keep_win_p1, keep_win_p2, keep_win_m
                         win2_points2 = 7.0 + if_win2_points2
@@ -147,8 +148,8 @@ def calculate(t1: List[Tuple[float, float]], t2: List[Tuple[float, float]], must
                 if total_points1 < best_response_points1 or (total_points1 == best_response_points1 and total_points2 > best_response_points2):
                     best_response_points1 = total_points1
                     best_response_points2 = total_points2
-                    t1_idx = t1_original.index(player1)
-                    t2_idx = t2_original.index(player2)
+                    t1_idx = t1_indices[i]
+                    t2_idx = t2_indices[j]
                     # Store both possible matchups - we'll use the more likely one for display
                     # In practice, the actual matchup depends on who wins
                     if win_prob1 >= 0.5:  # More likely team1 wins
@@ -176,17 +177,19 @@ def calculate(t1: List[Tuple[float, float]], t2: List[Tuple[float, float]], must
                 r2, rd2 = player2
                 match_points1, match_points2, win_prob1 = simulate_match(r1, rd1, r2, rd2)
                 
-                # Create new teams without the matched players
+                # Create new teams without the matched players, and track their indices
                 new_t1 = t1[:i] + t1[i+1:]
                 new_t2 = t2[:j] + t2[j+1:]
+                new_t1_indices = t1_indices[:i] + t1_indices[i+1:]
+                new_t2_indices = t2_indices[:j] + t2_indices[j+1:]
                 
                 # If team1 wins, consider counterpick option
                 if t1_counterpick_used:
-                    if_win1_points1, if_win1_points2, if_win1_matchup = calculate(new_t1, new_t2, 1, t1_original, t2_original, True, t2_counterpick_used)
+                    if_win1_points1, if_win1_points2, if_win1_matchup = calculate(new_t1, new_t2, 1, new_t1_indices, new_t2_indices, True, t2_counterpick_used)
                     win1_points1 = 7.0 + if_win1_points1
                 else:
-                    keep_win_p1, keep_win_p2, keep_win_m = calculate(new_t1, new_t2, 1, t1_original, t2_original, True, t2_counterpick_used)
-                    counterpick_p1, counterpick_p2, counterpick_m = calculate(new_t1, new_t2, 2, t1_original, t2_original, True, t2_counterpick_used)
+                    keep_win_p1, keep_win_p2, keep_win_m = calculate(new_t1, new_t2, 1, new_t1_indices, new_t2_indices, True, t2_counterpick_used)
+                    counterpick_p1, counterpick_p2, counterpick_m = calculate(new_t1, new_t2, 2, new_t1_indices, new_t2_indices, True, t2_counterpick_used)
                     if 7.0 + keep_win_p1 > 6.0 + counterpick_p1:
                         if_win1_points1, if_win1_points2, if_win1_matchup = keep_win_p1, keep_win_p2, keep_win_m
                         win1_points1 = 7.0 + if_win1_points1
@@ -196,11 +199,11 @@ def calculate(t1: List[Tuple[float, float]], t2: List[Tuple[float, float]], must
                 
                 # If team2 wins, consider counterpick option
                 if t2_counterpick_used:
-                    if_win2_points1, if_win2_points2, if_win2_matchup = calculate(new_t1, new_t2, 2, t1_original, t2_original, t1_counterpick_used, True)
+                    if_win2_points1, if_win2_points2, if_win2_matchup = calculate(new_t1, new_t2, 2, new_t1_indices, new_t2_indices, t1_counterpick_used, True)
                     win2_points2 = 7.0 + if_win2_points2
                 else:
-                    keep_win_p1, keep_win_p2, keep_win_m = calculate(new_t1, new_t2, 2, t1_original, t2_original, t1_counterpick_used, True)
-                    counterpick_p1, counterpick_p2, counterpick_m = calculate(new_t1, new_t2, 1, t1_original, t2_original, t1_counterpick_used, True)
+                    keep_win_p1, keep_win_p2, keep_win_m = calculate(new_t1, new_t2, 2, new_t1_indices, new_t2_indices, t1_counterpick_used, True)
+                    counterpick_p1, counterpick_p2, counterpick_m = calculate(new_t1, new_t2, 1, new_t1_indices, new_t2_indices, t1_counterpick_used, True)
                     if 7.0 + keep_win_p2 > 6.0 + counterpick_p2 or (7.0 + keep_win_p1 < 6.0 + counterpick_p1):
                         if_win2_points1, if_win2_points2, if_win2_matchup = keep_win_p1, keep_win_p2, keep_win_m
                         win2_points2 = 7.0 + if_win2_points2
@@ -216,8 +219,8 @@ def calculate(t1: List[Tuple[float, float]], t2: List[Tuple[float, float]], must
                 if total_points1 > best_response_points1:
                     best_response_points1 = total_points1
                     best_response_points2 = total_points2
-                    t1_idx = t1_original.index(player1)
-                    t2_idx = t2_original.index(player2)
+                    t1_idx = t1_indices[i]
+                    t2_idx = t2_indices[j]
                     # Store both possible matchups - we'll use the more likely one for display
                     if win_prob1 >= 0.5:  # More likely team1 wins
                         best_response_matchup = [(t1_idx, t2_idx)] + if_win1_matchup
@@ -245,17 +248,19 @@ def calculate(t1: List[Tuple[float, float]], t2: List[Tuple[float, float]], must
                 r2, rd2 = player2
                 match_points1, match_points2, win_prob1 = simulate_match(r1, rd1, r2, rd2)
                 
-                # Create new teams without the matched players
+                # Create new teams without the matched players, and track their indices
                 new_t1 = t1[:i] + t1[i+1:]
                 new_t2 = t2[:j] + t2[j+1:]
+                new_t1_indices = t1_indices[:i] + t1_indices[i+1:]
+                new_t2_indices = t2_indices[:j] + t2_indices[j+1:]
                 
                 # If team1 wins, consider counterpick option
                 if t1_counterpick_used:
-                    if_win1_points1, if_win1_points2, if_win1_matchup = calculate(new_t1, new_t2, 1, t1_original, t2_original, True, t2_counterpick_used)
+                    if_win1_points1, if_win1_points2, if_win1_matchup = calculate(new_t1, new_t2, 1, new_t1_indices, new_t2_indices, True, t2_counterpick_used)
                     win1_points1 = 7.0 + if_win1_points1
                 else:
-                    keep_win_p1, keep_win_p2, keep_win_m = calculate(new_t1, new_t2, 1, t1_original, t2_original, True, t2_counterpick_used)
-                    counterpick_p1, counterpick_p2, counterpick_m = calculate(new_t1, new_t2, 2, t1_original, t2_original, True, t2_counterpick_used)
+                    keep_win_p1, keep_win_p2, keep_win_m = calculate(new_t1, new_t2, 1, new_t1_indices, new_t2_indices, True, t2_counterpick_used)
+                    counterpick_p1, counterpick_p2, counterpick_m = calculate(new_t1, new_t2, 2, new_t1_indices, new_t2_indices, True, t2_counterpick_used)
                     if 7.0 + keep_win_p1 > 6.0 + counterpick_p1:
                         if_win1_points1, if_win1_points2, if_win1_matchup = keep_win_p1, keep_win_p2, keep_win_m
                         win1_points1 = 7.0 + if_win1_points1
@@ -265,11 +270,11 @@ def calculate(t1: List[Tuple[float, float]], t2: List[Tuple[float, float]], must
                 
                 # If team2 wins, consider counterpick option
                 if t2_counterpick_used:
-                    if_win2_points1, if_win2_points2, if_win2_matchup = calculate(new_t1, new_t2, 2, t1_original, t2_original, t1_counterpick_used, True)
+                    if_win2_points1, if_win2_points2, if_win2_matchup = calculate(new_t1, new_t2, 2, new_t1_indices, new_t2_indices, t1_counterpick_used, True)
                     win2_points2 = 7.0 + if_win2_points2
                 else:
-                    keep_win_p1, keep_win_p2, keep_win_m = calculate(new_t1, new_t2, 2, t1_original, t2_original, t1_counterpick_used, True)
-                    counterpick_p1, counterpick_p2, counterpick_m = calculate(new_t1, new_t2, 1, t1_original, t2_original, t1_counterpick_used, True)
+                    keep_win_p1, keep_win_p2, keep_win_m = calculate(new_t1, new_t2, 2, new_t1_indices, new_t2_indices, t1_counterpick_used, True)
+                    counterpick_p1, counterpick_p2, counterpick_m = calculate(new_t1, new_t2, 1, new_t1_indices, new_t2_indices, t1_counterpick_used, True)
                     if 7.0 + keep_win_p2 > 6.0 + counterpick_p2 or (7.0 + keep_win_p1 < 6.0 + counterpick_p1):
                         if_win2_points1, if_win2_points2, if_win2_matchup = keep_win_p1, keep_win_p2, keep_win_m
                         win2_points2 = 7.0 + if_win2_points2
@@ -285,8 +290,8 @@ def calculate(t1: List[Tuple[float, float]], t2: List[Tuple[float, float]], must
                 if total_points1 < best_response_points1 or (total_points1 == best_response_points1 and total_points2 > best_response_points2):
                     best_response_points1 = total_points1
                     best_response_points2 = total_points2
-                    t1_idx = t1_original.index(player1)
-                    t2_idx = t2_original.index(player2)
+                    t1_idx = t1_indices[i]
+                    t2_idx = t2_indices[j]
                     # Store both possible matchups - we'll use the more likely one for display
                     if win_prob1 >= 0.5:  # More likely team1 wins
                         best_response_matchup = [(t1_idx, t2_idx)] + if_win1_matchup
@@ -462,22 +467,39 @@ def find_best_matchup(t1: List[Tuple[float, float]], t2: List[Tuple[float, float
             r2, rd2 = player2
             match1_points1, match1_points2, win_prob1 = simulate_match(r1, rd1, r2, rd2)
             
-            # Create teams for remaining matches (add back banned players)
+            # Create teams for remaining matches (add back banned players, exclude match 1 players)
             t1_remaining = t1_for_match1[:i] + t1_for_match1[i+1:] + [t1[idx] for idx in t1_banned]
             t2_remaining = t2_for_match1[:j] + t2_for_match1[j+1:] + [t2[idx] for idx in t2_banned]
             
+            # Track indices for remaining players
+            # Compute indices: t1_for_match1 contains players NOT in t1_banned
+            # So indices are all indices except banned ones
+            t1_all_indices = list(range(len(t1)))
+            t2_all_indices = list(range(len(t2)))
+            t1_for_match1_indices = [idx for idx in t1_all_indices if idx not in t1_banned]
+            t2_for_match1_indices = [idx for idx in t2_all_indices if idx not in t2_banned]
+            # Remove match 1 player indices and add back banned indices
+            t1_match1_idx = t1_for_match1_indices[i]
+            t2_match1_idx = t2_for_match1_indices[j]
+            # Ensure indices are unique and match the players list
+            t1_remaining_indices = [idx for idx in t1_for_match1_indices if idx != t1_match1_idx] + t1_banned
+            t2_remaining_indices = [idx for idx in t2_for_match1_indices if idx != t2_match1_idx] + t2_banned
+            # Remove any duplicates (shouldn't happen, but safety check)
+            t1_remaining_indices = list(dict.fromkeys(t1_remaining_indices))  # Preserves order
+            t2_remaining_indices = list(dict.fromkeys(t2_remaining_indices))
+            
             # If team1 wins match 1, team1 must send first next
             # If team2 wins match 1, team2 must send first next
-            if_win1_points1, if_win1_points2, if_win1_matchup = calculate(t1_remaining, t2_remaining, 1)
-            if_win2_points1, if_win2_points2, if_win2_matchup = calculate(t1_remaining, t2_remaining, 2)
+            if_win1_points1, if_win1_points2, if_win1_matchup = calculate(t1_remaining, t2_remaining, 1, t1_remaining_indices, t2_remaining_indices)
+            if_win2_points1, if_win2_points2, if_win2_matchup = calculate(t1_remaining, t2_remaining, 2, t1_remaining_indices, t2_remaining_indices)
             
             # Expected value considering win probabilities
             total_points1 = match1_points1 + win_prob1 * if_win1_points1 + (1 - win_prob1) * if_win2_points1
             total_points2 = match1_points2 + win_prob1 * if_win1_points2 + (1 - win_prob1) * if_win2_points2
             
-            # Find original indices for first match
-            t1_idx = t1.index(player1) if player1 in t1 else -1
-            t2_idx = t2.index(player2) if player2 in t2 else -1
+            # Find original indices for first match (already computed above)
+            t1_idx = t1_match1_idx
+            t2_idx = t2_match1_idx
             
             if total_points1 > best_total_points1:
                 best_total_points1 = total_points1
