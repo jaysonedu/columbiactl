@@ -1,5 +1,107 @@
 import math
-from typing import List, Tuple
+import requests
+import time
+from typing import List, Tuple, Optional
+from urllib.parse import quote
+
+def fetch_player_ratings(players: List[str]) -> List[Tuple[float, float]]:
+    """
+    Fetch Glicko-2 ratings and RD for a list of players from TETR.IO API.
+    
+    Args:
+        players: List of player usernames or user IDs
+        
+    Returns:
+        List of (rating, RD) tuples in the same order as input players.
+        Uses default values (1500, 350) if a player cannot be found or has no league data.
+    """
+    API_BASE = "https://ch.tetr.io/api/users/"
+    results = []
+    
+    print(f"Fetching ratings for {len(players)} players from TETR.IO API...")
+    
+    for i, player in enumerate(players):
+        try:
+            # Rate limiting: wait 1 second between requests (except first)
+            if i > 0:
+                time.sleep(1)
+            
+            # Make API request with proper headers (using browser-like User-Agent to avoid 403)
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/json',
+                'Accept-Language': 'en-US,en;q=0.9'
+            }
+            # URL-encode the player name in case it contains special characters
+            # Use lowercase as per API docs: "The lowercase username or user ID to look up"
+            encoded_player = quote(player.lower(), safe='')
+            
+            # Use the league summaries endpoint which has glicko and rd directly
+            response = requests.get(f"{API_BASE}{encoded_player}/summaries/league", headers=headers, timeout=5)
+            
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    if data.get("success") and "data" in data:
+                        league_data = data["data"]
+                        
+                        # Get glicko and rd directly from data["data"]
+                        glicko = league_data.get("glicko")
+                        rd = league_data.get("rd")
+                        
+                        # Handle -1 values (less than 10 games or unranked)
+                        if glicko is not None and glicko != -1 and rd is not None and rd != -1:
+                            # Check if rd > 100 (unranked per API docs)
+                            if rd > 100:
+                                print(f"  [{i+1}/{len(players)}] {player}: Unranked (RD > 100: {rd:.1f}), using defaults")
+                                results.append((1500.0, 350.0))
+                            else:
+                                results.append((float(glicko), float(rd)))
+                                print(f"  [{i+1}/{len(players)}] {player}: Rating {glicko:.1f}, RD {rd:.1f}")
+                        else:
+                            # Less than 10 games played or unranked
+                            if glicko == -1 or rd == -1:
+                                print(f"  [{i+1}/{len(players)}] {player}: Less than 10 games played (unranked), using defaults")
+                            else:
+                                print(f"  [{i+1}/{len(players)}] {player}: No valid league data, using defaults")
+                            results.append((1500.0, 350.0))
+                    else:
+                        print(f"  [{i+1}/{len(players)}] {player}: API returned unsuccessful response")
+                        if "error" in data:
+                            error_msg = data["error"]
+                            if isinstance(error_msg, dict) and "msg" in error_msg:
+                                print(f"    Error: {error_msg['msg']}")
+                            else:
+                                print(f"    Error: {error_msg}")
+                        results.append((1500.0, 350.0))
+                except KeyError as e:
+                    print(f"  [{i+1}/{len(players)}] {player}: KeyError accessing response data: {e}")
+                    if 'data' in locals() and isinstance(data, dict) and "data" in data:
+                        print(f"    Data keys: {list(data['data'].keys()) if isinstance(data['data'], dict) else type(data['data'])}")
+                    results.append((1500.0, 350.0))
+                except Exception as e:
+                    print(f"  [{i+1}/{len(players)}] {player}: Error parsing response: {type(e).__name__}: {e}")
+                    results.append((1500.0, 350.0))
+            elif response.status_code == 403:
+                print(f"  [{i+1}/{len(players)}] {player}: HTTP 403 Forbidden - API may require authentication or have rate limiting")
+                print(f"    Response: {response.text[:200] if response.text else 'No response body'}")
+                results.append((1500.0, 350.0))
+            else:
+                print(f"  [{i+1}/{len(players)}] {player}: HTTP {response.status_code}, using defaults")
+                if response.text:
+                    print(f"    Response: {response.text[:200]}")
+                results.append((1500.0, 350.0))
+                
+        except requests.exceptions.RequestException as e:
+            print(f"  [{i+1}/{len(players)}] {player}: Error ({str(e)}), using defaults")
+            results.append((1500.0, 350.0))
+        except Exception as e:
+            print(f"  [{i+1}/{len(players)}] {player}: Unexpected error ({str(e)}), using defaults")
+            results.append((1500.0, 350.0))
+    
+    print(f"\nFetched ratings for {len(results)} players.")
+    return results
+
 
 def glicko2_g(phi: float) -> float:
     """Glicko-2 g function: g(φ) = 1 / sqrt(1 + 3φ²/π²)"""
@@ -81,7 +183,7 @@ def calculate(t1: List[Tuple[float, float]], t2: List[Tuple[float, float]], must
     
     if len(t1) == 0 and len(t2) == 0:
         return (0.0, 0.0, [])
-    
+
     if len(t1) == 1 and len(t2) == 1:
         r1, rd1 = t1[0]
         r2, rd2 = t2[0]
@@ -513,28 +615,377 @@ def find_best_matchup(t1: List[Tuple[float, float]], t2: List[Tuple[float, float
     return (best_total_points1, best_total_points2, best_matchup, t1_banned, t2_banned)
 
 
+def get_optimal_next_match(t1: List[Tuple[float, float]], t2: List[Tuple[float, float]], 
+                           t1_played: List[int], t2_played: List[int],
+                           must_send_first: int = None, t1_counterpick_used: bool = False, 
+                           t2_counterpick_used: bool = False, t1_banned: List[int] = None,
+                           t2_banned: List[int] = None) -> Tuple[int, int, float, float, List[Tuple[int, int]]]:
+    """
+    Get optimal next match given current state.
+    t1_played/t2_played: indices of players who have already played
+    t1_banned/t2_banned: indices of banned players (only used for match 1)
+    Returns (t1_player_idx, t2_player_idx, expected_t1_points, expected_t2_points, remaining_matchup).
+    """
+    # Get remaining players (exclude played and banned)
+    if t1_banned is None:
+        t1_banned = []
+    if t2_banned is None:
+        t2_banned = []
+    
+    # t1_banned = team1 players banned by team2, t2_banned = team2 players banned by team1
+    t1_remaining = [t1[i] for i in range(len(t1)) if i not in t1_played and i not in t1_banned]
+    t2_remaining = [t2[i] for i in range(len(t2)) if i not in t2_played and i not in t2_banned]
+    t1_remaining_indices = [i for i in range(len(t1)) if i not in t1_played and i not in t1_banned]
+    t2_remaining_indices = [i for i in range(len(t2)) if i not in t2_played and i not in t2_banned]
+    
+    if len(t1_remaining) == 0 or len(t2_remaining) == 0:
+        return (-1, -1, 0.0, 0.0, [])
+    
+    # Find optimal matchup
+    points1, points2, matchup = calculate(t1_remaining, t2_remaining, must_send_first, 
+                                           t1_remaining_indices, t2_remaining_indices,
+                                           t1_counterpick_used, t2_counterpick_used)
+    
+    if len(matchup) == 0:
+        return (-1, -1, 0.0, 0.0, [])
+    
+    # First match in the matchup is the optimal next match
+    next_t1_idx, next_t2_idx = matchup[0]
+    remaining_matchup = matchup[1:]
+    
+    return (next_t1_idx, next_t2_idx, points1, points2, remaining_matchup)
+
+
+def interactive_game(t1: List[Tuple[float, float]], t2: List[Tuple[float, float]]):
+    """
+    Interactive function to play through a game, updating at each phase.
+    """
+    print("=" * 60)
+    print("Interactive Tetris Team Match Calculator")
+    print("=" * 60)
+    print(f"\nTeam 1: {len(t1)} players")
+    for i, (r, rd) in enumerate(t1):
+        print(f"  [{i}] Rating: {r:.0f}, RD: {rd:.0f}")
+    print(f"\nTeam 2: {len(t2)} players")
+    for i, (r, rd) in enumerate(t2):
+        print(f"  [{i}] Rating: {r:.0f}, RD: {rd:.0f}")
+    
+    # Phase 1: Bans (Two rounds)
+    print("\n" + "=" * 60)
+    print("PHASE 1: BAN SELECTION - ROUND 1")
+    print("=" * 60)
+    
+    # Get optimal bans for reference
+    _, _, optimal_t1_banned, optimal_t2_banned = find_optimal_bans(t1, t2)
+    
+    # Round 1: Team1 bans first, then Team2 bans
+    print("\nRound 1 - Team1 bans first:")
+    print(f"  Optimal: Team1 should ban Team2 player: {optimal_t2_banned[0] if optimal_t2_banned else 'N/A'} {t2[optimal_t2_banned[0]] if optimal_t2_banned else ''}")
+    t2_available_r1 = [i for i in range(len(t2))]
+    print(f"  Available Team2 players: {t2_available_r1}")
+    ban1_input = input("  Team1 bans Team2 player (index, or Enter for optimal): ").strip()
+    ban1 = optimal_t2_banned[0] if not ban1_input and optimal_t2_banned else (int(ban1_input) if ban1_input else -1)
+    
+    print(f"\nRound 1 - Team2 bans:")
+    print(f"  Optimal: Team2 should ban Team1 player: {optimal_t1_banned[0] if optimal_t1_banned else 'N/A'} {t1[optimal_t1_banned[0]] if optimal_t1_banned else ''}")
+    t1_available_r1 = [i for i in range(len(t1))]
+    print(f"  Available Team1 players: {t1_available_r1}")
+    ban2_input = input("  Team2 bans Team1 player (index, or Enter for optimal): ").strip()
+    ban2 = optimal_t1_banned[0] if not ban2_input and optimal_t1_banned else (int(ban2_input) if ban2_input else -1)
+    
+    print("\n" + "=" * 60)
+    print("PHASE 1: BAN SELECTION - ROUND 2")
+    print("=" * 60)
+    
+    # Round 2: Team1 bans second, then Team2 bans second
+    print("\nRound 2 - Team1 bans second:")
+    print(f"  Optimal: Team1 should ban Team2 player: {optimal_t2_banned[1] if len(optimal_t2_banned) > 1 else 'N/A'} {t2[optimal_t2_banned[1]] if len(optimal_t2_banned) > 1 else ''}")
+    t2_available_r2 = [i for i in range(len(t2)) if i != ban1]
+    print(f"  Available Team2 players: {t2_available_r2}")
+    ban3_input = input("  Team1 bans Team2 player (index, or Enter for optimal): ").strip()
+    ban3 = optimal_t2_banned[1] if not ban3_input and len(optimal_t2_banned) > 1 else (int(ban3_input) if ban3_input else -1)
+    
+    print(f"\nRound 2 - Team2 bans second:")
+    print(f"  Optimal: Team2 should ban Team1 player: {optimal_t1_banned[1] if len(optimal_t1_banned) > 1 else 'N/A'} {t1[optimal_t1_banned[1]] if len(optimal_t1_banned) > 1 else ''}")
+    t1_available_r2 = [i for i in range(len(t1)) if i != ban2]
+    print(f"  Available Team1 players: {t1_available_r2}")
+    ban4_input = input("  Team2 bans Team1 player (index, or Enter for optimal): ").strip()
+    ban4 = optimal_t1_banned[1] if not ban4_input and len(optimal_t1_banned) > 1 else (int(ban4_input) if ban4_input else -1)
+    
+    # Store final bans
+    t1_banned = [ban2, ban4]  # Team2 banned these Team1 players
+    t2_banned = [ban1, ban3]  # Team1 banned these Team2 players
+    
+    print(f"\nFinal bans:")
+    print(f"  Team1 banned Team2 players: {t2_banned} {[t2[i] for i in t2_banned]}")
+    print(f"  Team2 banned Team1 players: {t1_banned} {[t1[i] for i in t1_banned]}")
+    
+    # Initialize game state
+    t1_played = []
+    t2_played = []
+    t1_score = 0.0
+    t2_score = 0.0
+    t1_counterpick_used = False
+    t2_counterpick_used = False
+    must_send_first = None  # None means first match, no restriction
+    match_num = 1
+    
+    # Phase 2: Matches
+    while len(t1_played) < len(t1) and len(t2_played) < len(t2):
+        print("\n" + "=" * 60)
+        print(f"PHASE {match_num + 1}: MATCH {match_num}")
+        print("=" * 60)
+        
+        # Get optimal next match
+        if match_num == 1:
+            # Match 1: exclude banned players
+            next_t1_idx, next_t2_idx, exp_points1, exp_points2, remaining_matchup = get_optimal_next_match(
+                t1, t2, [], [], must_send_first, t1_counterpick_used, t2_counterpick_used, t1_banned, t2_banned
+            )
+        else:
+            # Subsequent matches: banned players are now available
+            next_t1_idx, next_t2_idx, exp_points1, exp_points2, remaining_matchup = get_optimal_next_match(
+                t1, t2, t1_played, t2_played, must_send_first, t1_counterpick_used, t2_counterpick_used
+            )
+        
+        if next_t1_idx == -1:
+            print("No more matches possible!")
+            break
+        
+        # Get actual match result based on who must send first
+        print("\nEnter match result:")
+        actual_t1_idx = -1
+        actual_t2_idx = -1
+        
+        if must_send_first == 1:
+            # Team1 must send first
+            print(f"  Team1 must send first (winner of previous match)")
+            print(f"  Optimal: Team1 should send [{next_t1_idx}]")
+            t1_player_input = input(f"  Team1 player index (or Enter for {next_t1_idx}): ").strip()
+            actual_t1_idx = next_t1_idx if not t1_player_input else int(t1_player_input)
+            
+            # Calculate Team2's optimal response to Team1's choice
+            if match_num == 1:
+                t1_remaining = [t1[i] for i in range(len(t1)) if i not in t1_played and i not in t1_banned]
+                t2_remaining = [t2[i] for i in range(len(t2)) if i not in t2_played and i not in t2_banned]
+                t1_remaining_indices = [i for i in range(len(t1)) if i not in t1_played and i not in t1_banned]
+                t2_remaining_indices = [i for i in range(len(t2)) if i not in t2_played and i not in t2_banned]
+            else:
+                t1_remaining = [t1[i] for i in range(len(t1)) if i not in t1_played]
+                t2_remaining = [t2[i] for i in range(len(t2)) if i not in t2_played]
+                t1_remaining_indices = [i for i in range(len(t1)) if i not in t1_played]
+                t2_remaining_indices = [i for i in range(len(t2)) if i not in t2_played]
+            
+            # Find optimal Team2 response
+            best_t2_response = -1
+            best_t2_points1 = float('inf')
+            for j, player2 in enumerate(t2_remaining):
+                r1, rd1 = t1[actual_t1_idx]
+                r2, rd2 = player2
+                match_p1, match_p2, _ = simulate_match(r1, rd1, r2, rd2)
+                new_t1 = [p for p in t1_remaining if p != t1[actual_t1_idx]]
+                new_t2 = t2_remaining[:j] + t2_remaining[j+1:]
+                new_t1_indices = [idx for idx in t1_remaining_indices if idx != actual_t1_idx]
+                new_t2_indices = t2_remaining_indices[:j] + t2_remaining_indices[j+1:]
+                remaining_p1, _, _ = calculate(new_t1, new_t2, 2, new_t1_indices, new_t2_indices, t1_counterpick_used, t2_counterpick_used)
+                total_p1 = match_p1 + remaining_p1
+                if total_p1 < best_t2_points1:
+                    best_t2_points1 = total_p1
+                    best_t2_response = t2_remaining_indices[j]
+            
+            print(f"  Optimal Team2 response: [{best_t2_response}]")
+            t2_player_input = input(f"  Team2 player index (or Enter for {best_t2_response}): ").strip()
+            actual_t2_idx = best_t2_response if not t2_player_input else int(t2_player_input)
+            
+        elif must_send_first == 2:
+            # Team2 must send first
+            print(f"  Team2 must send first (winner of previous match)")
+            print(f"  Optimal: Team2 should send [{next_t2_idx}]")
+            t2_player_input = input(f"  Team2 player index (or Enter for {next_t2_idx}): ").strip()
+            actual_t2_idx = next_t2_idx if not t2_player_input else int(t2_player_input)
+            
+            # Calculate Team1's optimal response to Team2's choice
+            if match_num == 1:
+                t1_remaining = [t1[i] for i in range(len(t1)) if i not in t1_played and i not in t1_banned]
+                t2_remaining = [t2[i] for i in range(len(t2)) if i not in t2_played and i not in t2_banned]
+                t1_remaining_indices = [i for i in range(len(t1)) if i not in t1_played and i not in t1_banned]
+                t2_remaining_indices = [i for i in range(len(t2)) if i not in t2_played and i not in t2_banned]
+            else:
+                t1_remaining = [t1[i] for i in range(len(t1)) if i not in t1_played]
+                t2_remaining = [t2[i] for i in range(len(t2)) if i not in t2_played]
+                t1_remaining_indices = [i for i in range(len(t1)) if i not in t1_played]
+                t2_remaining_indices = [i for i in range(len(t2)) if i not in t2_played]
+            
+            # Find optimal Team1 response
+            best_t1_response = -1
+            best_t1_points1 = -1.0
+            for i, player1 in enumerate(t1_remaining):
+                r1, rd1 = player1
+                r2, rd2 = t2[actual_t2_idx]
+                match_p1, match_p2, _ = simulate_match(r1, rd1, r2, rd2)
+                new_t1 = t1_remaining[:i] + t1_remaining[i+1:]
+                new_t2 = [p for p in t2_remaining if p != t2[actual_t2_idx]]
+                new_t1_indices = t1_remaining_indices[:i] + t1_remaining_indices[i+1:]
+                new_t2_indices = [idx for idx in t2_remaining_indices if idx != actual_t2_idx]
+                remaining_p1, _, _ = calculate(new_t1, new_t2, 1, new_t1_indices, new_t2_indices, t1_counterpick_used, t2_counterpick_used)
+                total_p1 = match_p1 + remaining_p1
+                if total_p1 > best_t1_points1:
+                    best_t1_points1 = total_p1
+                    best_t1_response = t1_remaining_indices[i]
+            
+            print(f"  Optimal Team1 response: [{best_t1_response}]")
+            t1_player_input = input(f"  Team1 player index (or Enter for {best_t1_response}): ").strip()
+            actual_t1_idx = best_t1_response if not t1_player_input else int(t1_player_input)
+            
+        else:
+            # First match - show full optimal matchup
+            print(f"\nOptimal next match:")
+            r1, rd1 = t1[next_t1_idx]
+            r2, rd2 = t2[next_t2_idx]
+            print(f"  Team1[{next_t1_idx}] (rating {r1:.0f}, RD {rd1:.0f}) vs Team2[{next_t2_idx}] (rating {r2:.0f}, RD {rd2:.0f})")
+            match_p1, match_p2, win_prob = simulate_match(r1, rd1, r2, rd2)
+            print(f"  Expected: {match_p1:.2f} - {match_p2:.2f} (Team1 win prob: {win_prob:.1%})")
+            
+            t1_player_input = input(f"  Team1 player index (or Enter for {next_t1_idx}): ").strip()
+            t2_player_input = input(f"  Team2 player index (or Enter for {next_t2_idx}): ").strip()
+            
+            actual_t1_idx = next_t1_idx if not t1_player_input else int(t1_player_input)
+            actual_t2_idx = next_t2_idx if not t2_player_input else int(t2_player_input)
+        
+        # Get match score
+        score_input = input("  Match score (format: '7-4' or '6-7' for counterpick): ").strip()
+        t1_match_score, t2_match_score = map(int, score_input.split("-"))
+        
+        # Check for counterpick
+        used_counterpick = False
+        if (t1_match_score == 6 and t2_match_score == 7) or (t1_match_score == 7 and t2_match_score == 6):
+            counterpick_input = input("  Was this a counterpick? (y/n): ").strip().lower()
+            if counterpick_input == 'y':
+                used_counterpick = True
+                if t1_match_score == 6:  # Team1 counterpicked (took 6-7 loss)
+                    t1_counterpick_used = True
+                    t1_match_score, t2_match_score = 6, 7
+                else:  # Team2 counterpicked
+                    t2_counterpick_used = True
+                    t1_match_score, t2_match_score = 7, 6
+        
+        # Update scores
+        t1_score += t1_match_score
+        t2_score += t2_match_score
+        
+        # Update played players
+        t1_played.append(actual_t1_idx)
+        t2_played.append(actual_t2_idx)
+        
+        # Determine who must send first next
+        if t1_match_score == 7:
+            must_send_first = 1  # Team1 won, must send first
+        elif t2_match_score == 7:
+            must_send_first = 2  # Team2 won, must send first
+        else:
+            # Counterpick case - winner is the one who got 7
+            if t1_match_score == 6 and t2_match_score == 7:
+                must_send_first = 2  # Team2 won (even though team1 counterpicked)
+            else:
+                must_send_first = 1  # Team1 won
+        
+        # Display match result with winner's player first
+        if t1_match_score == 7:
+            # Team1 won - show Team1 first
+            print(f"\nMatch {match_num} result: Team1[{actual_t1_idx}] {t1_match_score} - {t2_match_score} Team2[{actual_t2_idx}]")
+        else:
+            # Team2 won - show Team2 first
+            print(f"\nMatch {match_num} result: Team2[{actual_t2_idx}] {t2_match_score} - {t1_match_score} Team1[{actual_t1_idx}]")
+        print(f"Current score: Team1 {t1_score:.0f} - {t2_score:.0f} Team2")
+        print(f"Remaining players:")
+        print(f"  Team1: {[i for i in range(len(t1)) if i not in t1_played]}")
+        print(f"  Team2: {[i for i in range(len(t2)) if i not in t2_played]}")
+        
+        match_num += 1
+    
+    print("\n" + "=" * 60)
+    print("GAME COMPLETE")
+    print("=" * 60)
+    print(f"Final score: Team1 {t1_score:.0f} - {t2_score:.0f} Team2")
+
+
 # Example usage
 if __name__ == "__main__":
-    # Example teams: each player is (rating, RD)
-    team1 = [(2035, 200), (1955, 200), (1462, 200), (2060, 200), (2882, 200)]
-    team2 = [(2387, 200), (2323, 200), (1880, 200), (2248, 200), (2086, 200)]
+    import sys
     
-    points1, points2, matchup, t1_banned, t2_banned = find_best_matchup(team1, team2)
+    # Check if user wants to fetch from API
+    if len(sys.argv) > 1 and sys.argv[1] == "--api":
+        # Fetch teams from API
+        if len(sys.argv) < 4:
+            print("Usage: python main.py --api <team1_player1,team1_player2,...> <team2_player1,team2_player2,...>")
+            print("Example: python main.py --api player1,player2,player3,player4,player5 opponent1,opponent2,opponent3,opponent4,opponent5")
+            sys.exit(1)
+        
+        team1_players = [p.strip() for p in sys.argv[2].split(",")]
+        team2_players = [p.strip() for p in sys.argv[3].split(",")]
+        
+        if len(team1_players) != 5 or len(team2_players) != 5:
+            print("Error: Each team must have exactly 5 players")
+            sys.exit(1)
+        
+        team1 = fetch_player_ratings(team1_players)
+        team2 = fetch_player_ratings(team2_players)
+        
+        # Check if user wants interactive mode
+        if len(sys.argv) > 4 and sys.argv[4] == "--interactive":
+            interactive_game(team1, team2)
+        else:
+            # Non-interactive mode with API data
+            points1, points2, matchup, t1_banned, t2_banned = find_best_matchup(team1, team2)
+            
+            print(f"\nTeam 1 players: {team1_players}")
+            print(f"Team 1 Glicko-2 ratings: {team1}")
+            print(f"\nTeam 2 players: {team2_players}")
+            print(f"Team 2 Glicko-2 ratings: {team2}")
+            print(f"\nBan Phase:")
+            print(f"  Team1 bans Team2 players: {[team2_players[i] for i in t2_banned]}")
+            print(f"  Team2 bans Team1 players: {[team1_players[i] for i in t1_banned]}")
+            print(f"\nOptimal Matchup Strategy:")
+            print("Note: After each match, the winner must send their next player first.")
+            print("The matchup shown assumes the most likely outcome at each step.\n")
+            for match_num, (t1_idx, t2_idx) in enumerate(matchup, 1):
+                r1, rd1 = team1[t1_idx]
+                r2, rd2 = team2[t2_idx]
+                print(f"Match {match_num}: {team1_players[t1_idx]} (rating {r1:.0f}, RD {rd1:.0f}) vs {team2_players[t2_idx]} (rating {r2:.0f}, RD {rd2:.0f})")
+                match_p1, match_p2, win_prob = simulate_match(r1, rd1, r2, rd2)
+                print(f"  Expected: {match_p1:.2f} - {match_p2:.2f} (Team1 win prob: {win_prob:.1%})")
+            print(f"\nTotal Expected Points:")
+            print(f"  Team 1: {points1:.2f}")
+            print(f"  Team 2: {points2:.2f}")
+            print(f"\nRun with --interactive flag for step-by-step guidance: python main.py --api <teams> --interactive")
     
-    print(f"Team 1 Glicko-2 ratings: {team1}")
-    print(f"Team 2 Glicko-2 ratings: {team2}")
-    print(f"\nBan Phase:")
-    print(f"  Team1 bans Team2 players at indices: {t2_banned} (ratings: {[team2[i] for i in t2_banned]})")
-    print(f"  Team2 bans Team1 players at indices: {t1_banned} (ratings: {[team1[i] for i in t1_banned]})")
-    print(f"\nOptimal Matchup Strategy:")
-    print("Note: After each match, the winner must send their next player first.")
-    print("The matchup shown assumes the most likely outcome at each step.\n")
-    for match_num, (t1_idx, t2_idx) in enumerate(matchup, 1):
-        r1, rd1 = team1[t1_idx]
-        r2, rd2 = team2[t2_idx]
-        print(f"Match {match_num}: Team1[{t1_idx}] (rating {r1:.0f}, RD {rd1:.0f}) vs Team2[{t2_idx}] (rating {r2:.0f}, RD {rd2:.0f})")
-        match_p1, match_p2, win_prob = simulate_match(r1, rd1, r2, rd2)
-        print(f"  Expected: {match_p1:.2f} - {match_p2:.2f} (Team1 win prob: {win_prob:.1%})")
-    print(f"\nTotal Expected Points:")
-    print(f"  Team 1: {points1:.2f}")
-    print(f"  Team 2: {points2:.2f}")
+    else:
+        # Example teams: each player is (rating, RD)
+        team1 = [(2035, 200), (1955, 200), (1462, 200), (2060, 200), (2882, 200)]
+        team2 = [(2387, 200), (2323, 200), (1880, 200), (2248, 200), (2086, 200)]
+        
+        # Check if user wants interactive mode
+        if len(sys.argv) > 1 and sys.argv[1] == "--interactive":
+            interactive_game(team1, team2)
+        else:
+            # Non-interactive mode: show optimal strategy
+            points1, points2, matchup, t1_banned, t2_banned = find_best_matchup(team1, team2)
+            
+            print(f"Team 1 Glicko-2 ratings: {team1}")
+            print(f"Team 2 Glicko-2 ratings: {team2}")
+            print(f"\nBan Phase:")
+            print(f"  Team1 bans Team2 players at indices: {t2_banned} (ratings: {[team2[i] for i in t2_banned]})")
+            print(f"  Team2 bans Team1 players at indices: {t1_banned} (ratings: {[team1[i] for i in t1_banned]})")
+            print(f"\nOptimal Matchup Strategy:")
+            print("Note: After each match, the winner must send their next player first.")
+            print("The matchup shown assumes the most likely outcome at each step.\n")
+            for match_num, (t1_idx, t2_idx) in enumerate(matchup, 1):
+                r1, rd1 = team1[t1_idx]
+                r2, rd2 = team2[t2_idx]
+                print(f"Match {match_num}: Team1[{t1_idx}] (rating {r1:.0f}, RD {rd1:.0f}) vs Team2[{t2_idx}] (rating {r2:.0f}, RD {rd2:.0f})")
+                match_p1, match_p2, win_prob = simulate_match(r1, rd1, r2, rd2)
+                print(f"  Expected: {match_p1:.2f} - {match_p2:.2f} (Team1 win prob: {win_prob:.1%})")
+            print(f"\nTotal Expected Points:")
+            print(f"  Team 1: {points1:.2f}")
+            print(f"  Team 2: {points2:.2f}")
+            print(f"\nRun with --api <team1_players> <team2_players> for non-interactive mode or add --interactive flag for step-by-step guidance: python main.py --api <team1_players> <team2_players> --interactive")
